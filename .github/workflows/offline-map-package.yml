@@ -1,0 +1,54 @@
+name: Build Offline Map Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag that will hold the offline map ZIP."
+        required: true
+        default: "map-latest"
+      release_title:
+        description: "Release title shown on GitHub."
+        required: true
+        default: "PNHS Offline Map Package"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build map package
+        run: python tools/offline-map/build_pnhs_package.py --output build/offline-map/pnhs-offline-map-package.zip
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag_name }}
+          RELEASE_TITLE: ${{ inputs.release_title }}
+          ASSET_PATH: build/offline-map/pnhs-offline-map-package.zip
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "$ASSET_PATH" --clobber
+            gh release edit "$TAG_NAME" \
+              --title "$RELEASE_TITLE" \
+              --notes "Updated PNHS offline map package." \
+              --latest
+          else
+            gh release create "$TAG_NAME" "$ASSET_PATH" \
+              --title "$RELEASE_TITLE" \
+              --notes "Updated PNHS offline map package." \
+              --latest
+          fi

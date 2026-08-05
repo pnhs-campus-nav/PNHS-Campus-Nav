@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+.DS_Store
+*.apk
+*.jks
+keystore.properties
+google-services.json
