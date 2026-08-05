@@ -1,4 +1,4 @@
-# PNHS Campus Nav APK
+# PNHS Campus Nav
 
 Public download and offline map package repository for PNHS Campus Nav.
 
