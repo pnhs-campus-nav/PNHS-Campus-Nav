@@ -51,6 +51,19 @@ Two sources of drift were removed to make that hold:
 - ZIP entries are written with a fixed timestamp instead of inheriting the build
   machine's file modification times
 
+A third one only shows up across machines. Label and POI centroids were averaged
+with `sum()`, whose algorithm CPython changed in 3.12 to use compensated
+summation, so the same geometry produced centroids differing in the last bit
+depending on the interpreter — nanometres on the ground, but a different package
+digest. The build now uses `math.fsum()` and rounds coordinates to seven decimal
+places, which makes the output identical on any Python version. Rounding alone
+was not enough: a centroid sitting within summation error of a rounding boundary
+still landed on opposite sides.
+
+This matters because CI pins Python 3.11 while a developer's machine may run
+something newer. Without this, the copy bundled in the APK never matched the copy
+CI published, and every fresh install saw a map update that did not exist.
+
 Verify after any change to the builder:
 
 ```bash

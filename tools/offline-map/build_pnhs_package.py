@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import sys
 import time
@@ -44,6 +45,21 @@ OVERPASS_RETRY_SLEEP_SECONDS = 45
 # carry this fixed date instead. 1980-01-01 is the earliest value the ZIP format
 # can represent.
 FIXED_ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+
+# Decimal places kept for every coordinate written into the GeoJSON layers.
+#
+# Belt and braces, not the primary defence -- math.fsum() in centroid() is what
+# actually removes the cross-version instability, and rounding alone is not
+# sufficient: a centroid that happens to sit within summation error of a
+# 0.00000005 boundary rounds to opposite sides on different interpreters.
+#
+# Seven decimals is about 1.1 cm, so this costs nothing a campus map can use,
+# and it means any float arithmetic added to a layer later is bounded to a
+# predictable, comparable precision. Applied to whole feature collections in
+# round_floats() so new layers are covered without having to remember.
+# Do not remove this in the name of precision -- nothing here needs nanometre
+# accuracy.
+COORDINATE_PRECISION = 7
 
 ROAD_HIGHWAYS = {
     "service",
@@ -114,7 +130,7 @@ def main() -> int:
     for layer_name, feature_collection in layers.items():
         target = work_dir / "map" / f"{layer_name}.geojson"
         target.write_text(
-            json.dumps(feature_collection, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(round_floats(feature_collection), ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
 
@@ -255,6 +271,22 @@ def fetch_overpass(overpass_urls: list[str], query: str) -> str:
                 errors.append(f"{overpass_url}: {error}")
 
     raise RuntimeError("All Overpass endpoints failed:\n" + "\n".join(errors))
+
+
+def round_floats(value: Any, precision: int = COORDINATE_PRECISION) -> Any:
+    """Recursively rounds every float so the output cannot depend on summation order.
+
+    Applied to whole feature collections rather than to individual coordinate
+    producers, so any arithmetic added to a layer later is covered without
+    having to remember. Ints and bools pass through untouched.
+    """
+    if isinstance(value, float):
+        return round(value, precision)
+    if isinstance(value, list):
+        return [round_floats(item, precision) for item in value]
+    if isinstance(value, dict):
+        return {key: round_floats(item, precision) for key, item in value.items()}
+    return value
 
 
 def read_http_error_body(error: urllib.error.HTTPError) -> str:
@@ -466,9 +498,17 @@ def centroid(geometry: list[dict[str, Any]]) -> tuple[float, float] | None:
     points = [(point["lat"], point["lon"]) for point in geometry if "lat" in point and "lon" in point]
     if not points:
         return None
+    # math.fsum, not sum. sum() is only correct to within accumulated error, and
+    # CPython 3.12 changed its algorithm (Neumaier compensated summation), so the
+    # same geometry produced slightly different centroids depending on the
+    # interpreter version. fsum computes the exactly-rounded sum and is stable
+    # across versions, which is what makes the package digest reproducible.
+    # Rounding in round_floats() is not a substitute: it cannot repair a value
+    # that lands either side of a rounding boundary, which is precisely what
+    # happened to a couple of centroids before this was fixed.
     return (
-        sum(point[0] for point in points) / len(points),
-        sum(point[1] for point in points) / len(points),
+        math.fsum(point[0] for point in points) / len(points),
+        math.fsum(point[1] for point in points) / len(points),
     )
 
 
