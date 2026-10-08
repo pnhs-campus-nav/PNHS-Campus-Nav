@@ -4,5 +4,10 @@ build/
 .DS_Store
 *.apk
 *.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
 keystore.properties
 google-services.json
