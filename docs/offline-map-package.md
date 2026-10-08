@@ -5,22 +5,58 @@ locked PNHS/Passi map area. It is not scraped from `tile.openstreetmap.org`.
 
 ## Build
 
+CI builds from the committed snapshot at `tools/offline-map/data/pnhs-overpass.json`
+rather than fetching Overpass live, so a release run does not fail when the public
+mirrors are overloaded:
+
+```bash
+python tools/offline-map/build_pnhs_package.py \
+  --input-osm-json tools/offline-map/data/pnhs-overpass.json \
+  --output build/offline-map/pnhs-offline-map-package.zip
+```
+
 From the project root on Windows:
 
 ```powershell
 .\tools\offline-map\build-pnhs-package.ps1
 ```
 
-If Overpass is unavailable, rebuild from a cached Overpass JSON export:
+To build against live OSM data instead (for example when refreshing the
+snapshot), omit `--input-osm-json`. This depends on the public Overpass mirrors
+and will fail if they are all unavailable; the builder retries the whole endpoint
+list a few times before giving up, because 504/500 responses under load are
+usually transient.
 
-```powershell
-.\tools\offline-map\build-pnhs-package.ps1 -InputOsmJson build/offline-map/source-osm-route-graph.json
-```
+Refreshing the committed snapshot itself is documented in
+`tools/offline-map/data/README.md`. Map data does not change on its own — OSM
+edits reach the app only when that snapshot is deliberately re-fetched.
 
 Output:
 
 ```text
 build/offline-map/pnhs-offline-map-package.zip
+```
+
+## Reproducibility
+
+The package ZIP is built to be byte-for-byte reproducible: building twice from
+the same snapshot produces the same SHA-256 on any machine. This matters because
+the app detects map updates by comparing the digest of the published package
+against the digest of the package it is running.
+
+Two sources of drift were removed to make that hold:
+
+- `metadata.json` carries a `sourceDigest` (SHA-256 of the source snapshot)
+  instead of the former wall-clock `generatedAt` timestamp
+- ZIP entries are written with a fixed timestamp instead of inheriting the build
+  machine's file modification times
+
+Verify after any change to the builder:
+
+```bash
+python tools/offline-map/build_pnhs_package.py --input-osm-json tools/offline-map/data/pnhs-overpass.json --output /tmp/a.zip
+python tools/offline-map/build_pnhs_package.py --input-osm-json tools/offline-map/data/pnhs-overpass.json --output /tmp/b.zip
+sha256sum /tmp/a.zip /tmp/b.zip   # must match
 ```
 
 The ZIP contains:
@@ -41,6 +77,13 @@ The ZIP contains:
 
 The app bundles `app/src/main/assets/offline-map/pnhs-offline-map-package.zip`
 as the built-in fallback package.
+
+Keep that bundled copy identical to the one CI publishes. The app records the
+digest of whichever package it is running and compares it to the published
+digest, so if the bundled copy drifts, a first-launch install reports a map
+update that does not exist and the user has to refresh once to clear it. Rebuild
+it from the snapshot with the command above and commit the result alongside any
+snapshot change.
 
 The default hosted package is the latest GitHub Release asset:
 

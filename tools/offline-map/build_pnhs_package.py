@@ -7,14 +7,15 @@ The output ZIP can be bundled in app assets or served from a stable HTTPS URL.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,25 @@ DEFAULT_OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://z.overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
 ]
+
+# Overpass mirrors return 504/500 under load far more often than they fail for a
+# real reason, so a single attempt per endpoint is not enough to conclude the
+# build is impossible. These two constants govern the retry budget around the
+# whole endpoint list. Observed in practice: two consecutive full passes over the
+# list failing entirely, then the third succeeding.
+OVERPASS_ATTEMPTS = 3
+OVERPASS_RETRY_SLEEP_SECONDS = 45
+
+# Every byte inside the ZIP is hashed by the app to decide whether a published
+# package differs from the installed one, so the archive must be reproducible:
+# two builds from the same OSM input have to produce identical bytes, on any
+# machine, at any time. That rules out both a wall-clock timestamp in the
+# metadata and ZIP entry timestamps inherited from the filesystem, so entries
+# carry this fixed date instead. 1980-01-01 is the earliest value the ZIP format
+# can represent.
+FIXED_ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 
 ROAD_HIGHWAYS = {
     "service",
@@ -102,7 +121,14 @@ def main() -> int:
     metadata = {
         "packageType": "campusatlas-offline-map",
         "schemaVersion": 1,
-        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        # Replaces the former wall-clock "generatedAt". The app hashes the whole
+        # ZIP to detect updates, so a build timestamp here made every build
+        # publish a different digest even when the map data was unchanged, which
+        # left first-launch installs permanently reporting a phantom update. The
+        # source digest identifies the data instead, and is stable across
+        # machines and reruns. The snapshot's real fetch date lives in
+        # tools/offline-map/data/README.md, outside the archive.
+        "sourceDigest": "sha256:" + hashlib.sha256(overpass_json.encode("utf-8")).hexdigest(),
         "source": "OpenStreetMap via cached Overpass JSON" if args.input_osm_json else "OpenStreetMap via Overpass API",
         "license": "ODbL",
         "bbox": {
@@ -125,7 +151,13 @@ def main() -> int:
     with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for file in sorted(work_dir.rglob("*")):
             if file.is_file():
-                archive.write(file, file.relative_to(work_dir).as_posix())
+                # archive.write() would stamp each entry with the file's mtime,
+                # making the output depend on when the files happened to be
+                # written. Explicit ZipInfo entries keep the bytes stable.
+                info = zipfile.ZipInfo(file.relative_to(work_dir).as_posix(), date_time=FIXED_ZIP_DATE_TIME)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o644 << 16
+                archive.writestr(info, file.read_bytes())
 
     if not args.keep_work_dir:
         shutil.rmtree(work_dir)
@@ -197,25 +229,30 @@ def fetch_overpass(overpass_urls: list[str], query: str) -> str:
     urls = overpass_urls or DEFAULT_OVERPASS_URLS
     body = urllib.parse.urlencode({"data": query}).encode("utf-8")
     errors: list[str] = []
-    for overpass_url in urls:
-        request = urllib.request.Request(
-            overpass_url,
-            data=body,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "CampusAtlasOfflineMapBuilder/1.0",
-            },
-            method="POST",
-        )
-        try:
-            print(f"Trying {overpass_url}")
-            with urllib.request.urlopen(request, timeout=90) as response:
-                return response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            body_text = read_http_error_body(error)
-            errors.append(f"{overpass_url}: HTTP {error.code} {error.reason}. {body_text}")
-        except Exception as error:  # noqa: BLE001 - print all endpoint failures for CLI users.
-            errors.append(f"{overpass_url}: {error}")
+    for attempt in range(1, OVERPASS_ATTEMPTS + 1):
+        if attempt > 1:
+            print(f"All endpoints failed, retrying pass {attempt} of {OVERPASS_ATTEMPTS} "
+                  f"in {OVERPASS_RETRY_SLEEP_SECONDS}s")
+            time.sleep(OVERPASS_RETRY_SLEEP_SECONDS)
+        for overpass_url in urls:
+            request = urllib.request.Request(
+                overpass_url,
+                data=body,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "CampusAtlasOfflineMapBuilder/1.0",
+                },
+                method="POST",
+            )
+            try:
+                print(f"Trying {overpass_url}")
+                with urllib.request.urlopen(request, timeout=90) as response:
+                    return response.read().decode("utf-8")
+            except urllib.error.HTTPError as error:
+                body_text = read_http_error_body(error)
+                errors.append(f"{overpass_url}: HTTP {error.code} {error.reason}. {body_text}")
+            except Exception as error:  # noqa: BLE001 - print all endpoint failures for CLI users.
+                errors.append(f"{overpass_url}: {error}")
 
     raise RuntimeError("All Overpass endpoints failed:\n" + "\n".join(errors))
 

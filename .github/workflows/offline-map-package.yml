@@ -29,7 +29,14 @@ jobs:
           python-version: "3.11"
 
       - name: Build map package
-        run: python tools/offline-map/build_pnhs_package.py --output build/offline-map/pnhs-offline-map-package.zip
+        # Builds from the committed OSM snapshot rather than fetching Overpass
+        # live. Public mirrors return 504/500 under load often enough to fail
+        # releases unpredictably, and a committed snapshot also keeps the output
+        # reproducible so the app's digest comparison stays meaningful.
+        run: >-
+          python tools/offline-map/build_pnhs_package.py
+          --input-osm-json tools/offline-map/data/pnhs-overpass.json
+          --output build/offline-map/pnhs-offline-map-package.zip
 
       - name: Publish release asset
         env:
